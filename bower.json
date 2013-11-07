@@ -1,0 +1,9 @@
+{
+    "name":  "cardgame",
+    "version": "0.0.1",
+    "dependencies": {
+        "bootstrap": "2.3.2",
+        "jquery": "latest"
+    },
+    "directory": "components"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "online-cardgame",
+  "description": "",
+  "version": "0.0.1",
+  "author": {
+    "name": "Tamas Piros",
+    "email": "tamas@tamaspiros.co.uk",
+    "web": "http://tamaspiros.co.uk"
+  },
+  "dependencies": {
+    "express": "latest"
+    "socket.io": "latest",
+  }
+}
