@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Macaonline</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Bootstrap -->
+    <!--<link href="http://tamaspiros.co.uk/resources/bootstrap.css" rel="stylesheet" media="screen">-->
+    <link href="http://tamas/cdn/bootstrap.css" rel="stylesheet" media="screen">
+    <style type="text/css">
+
+      /* Sticky footer styles
+      -------------------------------------------------- */
+
+      html,
+      body {
+        height: 100%;
+        /* The html and body elements cannot have any padding or margin. */
+      }
+
+      /* Wrapper for page content to push down footer */
+      #wrap {
+        min-height: 100%;
+        height: auto !important;
+        height: 100%;
+        /* Negative indent footer by it's height */
+        margin: 0 auto -150px;
+      }
+
+      #table {
+        margin-top: 5px;
+      }
+
+      /* Set the fixed height of the footer here */
+      #footer {
+        height: 150px;
+      }
+      #footer {
+        background-color: #f5f5f5;
+        overflow:scroll;
+      }
+      #footer #log:before {
+        font-size: 36px;
+        font-weight: bold;
+        content: "Logging";
+        float: left;
+        margin-left: -230px;
+        margin-top: 65px;
+        position: fixed;
+
+      }
+      </style>
+      <script src="http://tamas:8080/socket.io/socket.io.js"></script>
+      <!--<script src="http://ec2-54-229-63-210.eu-west-1.compute.amazonaws.com:8080/socket.io/socket.io.js"></script>-->
+      <script src="http://tamas/cdn/jquery.js"></script>
+      <!--<script src="http://tamaspiros.co.uk/resources/jquery.js"></script>-->
+      <script src="http://tamas/cdn/bootstrap.js"></script>
+      <!--<script src="http://tamaspiros.co.uk/resources//bootstrap.js"></script>-->
+      <script src="client.js"></script>
+  </head>
+  <body>
+  <!-- Part 1: Wrap all page content here -->
+    <div id="wrap">
+      <div class="container">
+        <div class="page-header">
+          <h1>Macaonline</h1>
+        </div>
+        <div class="row">
+          <div class="span9">
+            <p>Hello and welcome to Macaonline. Please have a <a href="#myModal" data-toggle="modal">look at the rules</a> before playing.</p>
+          </div>
+          <div id="counter"></div>
+        </div>
+        <div class="alert" id="tableFull">
+          <strong>Table is full.</strong> Please check back later.
+        </div>
+        <div id="loginForm">
+          <form class="form-inline">
+            <input type="text" class="input" id="name" placeholder="Your name">
+            <button type="submit" class="btn btn-success" id="join">Join table</button>
+            <label id="error"></label>
+          </form>
+        </div>
+        <div id="waiting"><p>Waiting for other player to join</p></div>
+        <div>
+          <ul class="inline">
+            <li><p id="progressUpdate"></p></li>
+            <li><p id="opponentCardCount"></p></li>
+            <li><p id="numberRequest"><input type="text" id="numberRequestTxt"><button class="btn btn-success" id="numberRequestBtn">OK</button></p></li>
+            <li><p id="suiteRequest"><input type="text" id="suiteRequestTxt" placeholder="suite request"><button class="btn btn-success" id="suiteRequestBtn">OK</button></p></li>
+            <li><p id="pack"></p></li>
+          </ul>
+        </div>
+        <div id="playArea">
+          <p id="playOption"></p>
+          <button id="drawCard" class="btn btn-success">Draw a card</button>
+          <button id="penalising" class="btn btn-warning">Penalising cards</button>
+          <p>Discard pile:</p>
+          <p id="table"></p>
+          <p>Cards in your hand:</p>
+          <p id="hand"></p>
+        </div>
+      </div>
+    </div>
+
+    <div id="footer">
+      <div class="container" id="log">
+        <ul id="updates" class="unstyled">
+        </ul>
+      </div>
+    </div>
+  </body>
+</html>
