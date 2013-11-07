@@ -11,7 +11,7 @@ function Game() {
 Game.prototype._createPack = function() {
   var suits = ["H", "C", "S", "D"];
   var pack = [];
-  var n = 12;
+  var n = 52;
   var index = n / suits.length;
   var packCount= 0;
   for(i = 0; i <= 3; i++)
