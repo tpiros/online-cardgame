@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "express": "latest",
-    "socket.io": "latest"
+    "socket.io": "latest",
+    "node-uuid": "~1.4.1"
   }
 }
