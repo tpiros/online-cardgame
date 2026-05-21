@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useGameState } from '../hooks/useGameState'
 import { gameApi } from '../lib/game-api'
 import { CardComponent } from './CardComponent'
-import { isCardPlayable, isPenalisingActionCardPlayable, getCardNumber } from '../lib/game-logic'
+import { isCardPlayable, isPenalisingActionCardPlayable, getCardNumber, getCardSuit } from '../lib/game-logic'
 import type { CardId } from '../types/game'
 
 interface GameBoardProps {
@@ -10,15 +10,22 @@ interface GameBoardProps {
   onLeave: () => void
 }
 
+const SUIT_SYMBOLS: Record<string, string> = { H: '\u2665', C: '\u2663', S: '\u2660', D: '\u2666' }
+const SUIT_COLORS: Record<string, string> = { H: '#dc2626', C: '#1e293b', S: '#1e293b', D: '#dc2626' }
+const SUIT_NAMES: Record<string, string> = { H: 'Hearts', C: 'Clubs', S: 'Spades', D: 'Diamonds' }
+const NUMBER_NAMES: Record<number, string> = { 1: 'Ace', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6', 7: '7', 8: '8', 9: '9', 10: '10', 11: 'Jack', 12: 'Queen' }
+
 export function GameBoard({ tableId, onLeave }: GameBoardProps) {
   const {
     table, myPlayer, otherPlayers, messages, isMyTurn,
-    lastCardOnTable, packCount, error, playCard, drawCard, takePenalty, suiteRequest,
+    lastCardOnTable, packCount, error, playCard, drawCard, takePenalty, suiteRequest, numberRequest,
   } = useGameState(tableId)
 
   const [selectedCard, setSelectedCard] = useState<number | null>(null)
   const [showSuiteDialog, setShowSuiteDialog] = useState(false)
+  const [showNumberDialog, setShowNumberDialog] = useState(false)
   const [suiteInput, setSuiteInput] = useState('')
+  const [numberInput, setNumberInput] = useState<number | null>(null)
 
   if (!table || !myPlayer) {
     return (
@@ -32,11 +39,19 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
 
   const hand: CardId[] = myPlayer.hand || []
   const isPenalising = table.penalising_action_card && table.action_card
-  const isRequesting = table.request_action_card && table.action_card
+  const isRequestingBySuite = table.request_action_card && table.action_card && !!table.suite_request
+  const isRequestingByNumber = table.request_action_card && table.action_card && !!table.number_request
 
   const canPlayCard = (card: CardId): boolean => {
     if (!lastCardOnTable) return true
     if (isPenalising) return isPenalisingActionCardPlayable(card, lastCardOnTable)
+    if (isRequestingBySuite) {
+      return getCardNumber(card) === 1 || getCardSuit(card) === table.suite_request!
+    }
+    if (isRequestingByNumber) {
+      const requestedNum = parseInt(table.number_request!)
+      return getCardNumber(card) === 13 || getCardNumber(card) === requestedNum
+    }
     return isCardPlayable(card, lastCardOnTable)
   }
 
@@ -45,9 +60,16 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
     if (!canPlayCard(card)) return
 
     const num = getCardNumber(card)
+
     if (num === 1 && !isPenalising) {
       setSelectedCard(index)
       setShowSuiteDialog(true)
+      return
+    }
+
+    if (num === 13 && !isPenalising) {
+      setSelectedCard(index)
+      setShowNumberDialog(true)
       return
     }
 
@@ -55,18 +77,38 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
     setSelectedCard(null)
   }
 
-  const handleSuiteSubmit = () => {
-    if (selectedCard !== null && suiteInput) {
-      suiteRequest(suiteInput.toUpperCase())
-      playCard(selectedCard, hand[selectedCard])
-      setShowSuiteDialog(false)
-      setSuiteInput('')
-      setSelectedCard(null)
-    }
+  const handleSuiteSubmit = async () => {
+    if (selectedCard === null || !suiteInput) return
+    const cardToPlay = hand[selectedCard]
+    const idx = selectedCard
+    setShowSuiteDialog(false)
+    setSuiteInput('')
+    setSelectedCard(null)
+    await playCard(idx, cardToPlay)
+    await suiteRequest(suiteInput)
+  }
+
+  const handleNumberSubmit = async () => {
+    if (selectedCard === null || numberInput === null) return
+    const cardToPlay = hand[selectedCard]
+    const idx = selectedCard
+    setShowNumberDialog(false)
+    setNumberInput(null)
+    setSelectedCard(null)
+    await playCard(idx, cardToPlay)
+    await numberRequest(numberInput)
+  }
+
+  const handleCancelDialog = () => {
+    setShowSuiteDialog(false)
+    setShowNumberDialog(false)
+    setSuiteInput('')
+    setNumberInput(null)
+    setSelectedCard(null)
   }
 
   const opponent = otherPlayers[0]
-  const gameFinished = table.status !== 'playing' && myPlayer.hand.length === 0
+  const gameFinished = table.status === 'finished' || (table.status !== 'playing' && myPlayer.hand.length === 0)
 
   return (
     <div className="game-page">
@@ -166,9 +208,15 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
                 <span>No cards played yet</span>
               </div>
             )}
-            {table.suite_request && (
+            {isRequestingBySuite && table.suite_request && (
               <div className="game-suite-request">
-                Requested: {table.suite_request}
+                <span style={{ color: SUIT_COLORS[table.suite_request] }}>{SUIT_SYMBOLS[table.suite_request]}</span>
+                {' '}{SUIT_NAMES[table.suite_request]} requested
+              </div>
+            )}
+            {isRequestingByNumber && table.number_request && (
+              <div className="game-suite-request">
+                {NUMBER_NAMES[parseInt(table.number_request)] ?? table.number_request} requested
               </div>
             )}
           </div>
@@ -183,16 +231,6 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
                   <path d="M12 2v10M4.93 4.93l2.83 2.83M2 12h10M4.93 19.07l2.83-2.83M12 22v-10M19.07 19.07l-2.83-2.83M22 12H12M19.07 4.93l-2.83 2.83" />
                 </svg>
                 Take {table.forced_draw} Cards
-              </button>
-            )}
-            {isRequesting && !table.suite_request && (
-              <button onClick={() => setShowSuiteDialog(true)} className="game-action-btn game-action-request">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="10" />
-                  <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-                  <line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-                Request Suit
               </button>
             )}
           </div>
@@ -249,41 +287,50 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
 
       {/* Suite Request Dialog */}
       {showSuiteDialog && (
-        <div className="game-overlay" onClick={() => { setShowSuiteDialog(false); setSuiteInput(''); setSelectedCard(null) }}>
+        <div className="game-overlay" onClick={handleCancelDialog}>
           <div className="game-dialog" onClick={(e) => e.stopPropagation()}>
             <h3 className="game-dialog-title">Request a Suit</h3>
-            <p className="game-dialog-sub">Choose the suit you want your opponent to play</p>
+            <p className="game-dialog-sub">Choose the suit your opponent must play</p>
             <div className="game-suit-grid">
-              {(['H', 'C', 'S', 'D'] as const).map((suit) => {
-                const symbols: Record<string, string> = { H: '\u2665', C: '\u2663', S: '\u2660', D: '\u2666' }
-                const colors: Record<string, string> = { H: '#dc2626', C: '#1e293b', S: '#1e293b', D: '#dc2626' }
-                const names: Record<string, string> = { H: 'Hearts', C: 'Clubs', S: 'Spades', D: 'Diamonds' }
-                return (
-                  <button
-                    key={suit}
-                    onClick={() => setSuiteInput(suit)}
-                    className={`game-suit-btn ${suiteInput === suit ? 'game-suit-btn-selected' : ''}`}
-                  >
-                    <span style={{ color: colors[suit], fontSize: 32 }}>{symbols[suit]}</span>
-                    <span className="game-suit-name">{names[suit]}</span>
-                  </button>
-                )
-              })}
+              {(['H', 'C', 'S', 'D'] as const).map((suit) => (
+                <button
+                  key={suit}
+                  onClick={() => setSuiteInput(suit)}
+                  className={`game-suit-btn ${suiteInput === suit ? 'game-suit-btn-selected' : ''}`}
+                >
+                  <span style={{ color: SUIT_COLORS[suit], fontSize: 32 }}>{SUIT_SYMBOLS[suit]}</span>
+                  <span className="game-suit-name">{SUIT_NAMES[suit]}</span>
+                </button>
+              ))}
             </div>
             <div className="game-dialog-actions">
-              <button
-                onClick={() => { setShowSuiteDialog(false); setSuiteInput(''); setSelectedCard(null) }}
-                className="game-dialog-cancel"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSuiteSubmit}
-                disabled={!suiteInput}
-                className="game-dialog-confirm"
-              >
-                Confirm
-              </button>
+              <button onClick={handleCancelDialog} className="game-dialog-cancel">Cancel</button>
+              <button onClick={handleSuiteSubmit} disabled={!suiteInput} className="game-dialog-confirm">Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Number Request Dialog (King) */}
+      {showNumberDialog && (
+        <div className="game-overlay" onClick={handleCancelDialog}>
+          <div className="game-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3 className="game-dialog-title">Request a Number</h3>
+            <p className="game-dialog-sub">Choose the number your opponent must play</p>
+            <div className="game-number-grid">
+              {[1,2,3,4,5,6,7,8,9,10,11,12].map((num) => (
+                <button
+                  key={num}
+                  onClick={() => setNumberInput(num)}
+                  className={`game-number-btn ${numberInput === num ? 'game-suit-btn-selected' : ''}`}
+                >
+                  {NUMBER_NAMES[num] ?? num}
+                </button>
+              ))}
+            </div>
+            <div className="game-dialog-actions">
+              <button onClick={handleCancelDialog} className="game-dialog-cancel">Cancel</button>
+              <button onClick={handleNumberSubmit} disabled={numberInput === null} className="game-dialog-confirm">Confirm</button>
             </div>
           </div>
         </div>

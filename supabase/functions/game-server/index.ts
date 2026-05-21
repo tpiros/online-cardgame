@@ -56,6 +56,15 @@ function isWinning(hand: string[]): boolean {
   return hand.length === 0;
 }
 
+function replenishPack(pack: string[], cardsOnTable: string[]): { pack: string[]; cardsOnTable: string[] } {
+  if (pack.length < 1) {
+    const lastCard = cardsOnTable[cardsOnTable.length - 1];
+    const discarded = cardsOnTable.slice(0, -1);
+    return { pack: shufflePack(discarded), cardsOnTable: [lastCard] };
+  }
+  return { pack, cardsOnTable };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -91,7 +100,6 @@ Deno.serve(async (req: Request) => {
     const userId = user.id;
     const userName = user.user_metadata?.name || user.email?.split("@")[0] || "Player";
 
-    // Ensure player record exists (idempotent upsert)
     const ensurePlayer = async () => {
       const { data: existingPlayer } = await supabase
         .from("players")
@@ -123,7 +131,6 @@ Deno.serve(async (req: Request) => {
 
         if (error) throw error;
 
-        // Creator automatically joins the table (1 player so far)
         await supabase
           .from("players")
           .update({ table_id: table.id, status: "intable" })
@@ -167,7 +174,8 @@ Deno.serve(async (req: Request) => {
         const { count: playerCount } = await supabase
           .from("players")
           .select("*", { count: "exact", head: true })
-          .eq("table_id", tableId);
+          .eq("table_id", tableId)
+          .in("status", ["intable", "playing"]);
 
         if (table.status !== "available" || (playerCount ?? 0) >= table.player_limit) {
           return new Response(JSON.stringify({ error: "Table is full or in progress" }), {
@@ -176,8 +184,6 @@ Deno.serve(async (req: Request) => {
           });
         }
 
-        // Set player's table_id BEFORE inserting the message
-        // so the RLS policy on game_messages can verify membership
         await supabase
           .from("players")
           .update({ table_id: tableId, status: "intable" })
@@ -205,31 +211,27 @@ Deno.serve(async (req: Request) => {
         const { tableId } = body;
         await ensurePlayer();
 
-        // Clear player's table assignment
         await supabase
           .from("players")
           .update({ table_id: null, status: "available", hand: [], turn_finished: false })
           .eq("id", userId);
 
-        // Check remaining players
         const { count: remainingCount } = await supabase
           .from("players")
           .select("*", { count: "exact", head: true })
           .eq("table_id", tableId);
 
         if ((remainingCount ?? 0) === 0) {
-          // No players left -- delete the table and its messages
           await supabase.from("game_messages").delete().eq("table_id", tableId);
           await supabase.from("tables").delete().eq("id", tableId);
         } else {
-          // Reopen the table if it was full
-          const { data: table } = await supabase
+          const { data: tableData } = await supabase
             .from("tables")
             .select("status")
             .eq("id", tableId)
             .single();
 
-          if (table && table.status !== "playing") {
+          if (tableData && tableData.status !== "playing") {
             await supabase
               .from("tables")
               .update({ status: "available" })
@@ -286,7 +288,13 @@ Deno.serve(async (req: Request) => {
         }
 
         const startingPlayerIndex = Math.floor(Math.random() * players.length);
+        const firstCardNum = getCardNumber(firstCard);
         const actionCardActive = isActionCard(firstCard);
+        const penalisingActive = isPenalisingCard(firstCard);
+        // If the first card is a 2, start with forced_draw = 2
+        const initialForcedDraw = penalisingActive ? 2 : 0;
+        // If the first card is an Ace, the starting player must request a suit
+        const requestActive = firstCardNum === 1;
 
         await supabase
           .from("tables")
@@ -295,7 +303,11 @@ Deno.serve(async (req: Request) => {
             pack,
             cards_on_table: [firstCard],
             action_card: actionCardActive,
-            penalising_action_card: isPenalisingCard(firstCard),
+            penalising_action_card: penalisingActive,
+            request_action_card: requestActive,
+            forced_draw: initialForcedDraw,
+            suite_request: null,
+            number_request: null,
             current_player_index: startingPlayerIndex,
             ready_to_play_counter: players.length,
           })
@@ -351,20 +363,31 @@ Deno.serve(async (req: Request) => {
 
         const cardsOnTable: string[] = table.cards_on_table || [];
         const lastCard = cardsOnTable[cardsOnTable.length - 1];
+        const cardNum = getCardNumber(cardId);
+        const cardSuit = getCardSuit(cardId);
 
+        // Validate card playability based on active game state
         if (table.action_card && table.penalising_action_card) {
+          // 2 is active: must play a 2 to counter, or use take-penalty action
           if (!isPenalisingActionCardPlayable(cardId, lastCard)) {
-            return new Response(JSON.stringify({ error: "Must play a 2 or take penalty" }), {
+            return new Response(JSON.stringify({ error: "Must play a 2 or take the penalty" }), {
               status: 400,
               headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
           }
         } else if (table.request_action_card && table.suite_request) {
-          // Must play the requested suit, or another ace to re-request
-          const cardNum = getCardNumber(cardId);
-          const cardSuit = getCardSuit(cardId);
+          // Ace suit request active: must match requested suit, or counter with another Ace
           if (cardNum !== 1 && cardSuit !== table.suite_request) {
             return new Response(JSON.stringify({ error: `Must play ${table.suite_request} suit or an Ace` }), {
+              status: 400,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+        } else if (table.request_action_card && table.number_request) {
+          // King number request active: must match requested number, or counter with another King
+          const requestedNum = parseInt(table.number_request);
+          if (cardNum !== 13 && cardNum !== requestedNum) {
+            return new Response(JSON.stringify({ error: `Must play a ${table.number_request} or a King` }), {
               status: 400,
               headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
@@ -380,28 +403,28 @@ Deno.serve(async (req: Request) => {
         newHand.splice(serverIndex, 1);
         const newCardsOnTable = [...cardsOnTable, cardId];
 
-        let actionCard = table.action_card;
-        let penalisingActionCard = table.penalising_action_card;
-        let requestActionCard = table.request_action_card;
-        let forcedDraw = table.forced_draw;
-        let suiteRequest: string | null = table.suite_request;
+        // Compute new action state based on the played card
+        let actionCard = false;
+        let penalisingActionCard = false;
+        let requestActionCard = false;
+        let forcedDraw = 0;
+        let suiteRequest: string | null = null;
+        let numberRequest: string | null = null;
 
-        if (getCardNumber(cardId) === 2) {
+        if (cardNum === 2) {
           actionCard = true;
           penalisingActionCard = true;
-          forcedDraw += 2;
-          suiteRequest = null;
-        } else if (getCardNumber(cardId) === 1) {
+          forcedDraw = (table.forced_draw || 0) + 2;
+        } else if (cardNum === 1) {
+          // Ace: player must follow up with a suite-request action
           actionCard = true;
           requestActionCard = true;
-          // suiteRequest will be set by the follow-up suite-request action
-        } else {
-          actionCard = false;
-          penalisingActionCard = false;
-          requestActionCard = false;
-          forcedDraw = 0;
-          suiteRequest = null;
+        } else if (cardNum === 13) {
+          // King: player must follow up with a number-request action
+          actionCard = true;
+          requestActionCard = true;
         }
+        // All other cards: all flags stay false/null (reset)
 
         const { data: allPlayers } = await supabase
           .from("players")
@@ -428,6 +451,7 @@ Deno.serve(async (req: Request) => {
             request_action_card: requestActionCard,
             forced_draw: forcedDraw,
             suite_request: suiteRequest,
+            number_request: numberRequest,
             current_player_index: nextPlayerIndex,
           })
           .eq("id", tableId);
@@ -440,6 +464,15 @@ Deno.serve(async (req: Request) => {
         });
 
         const winner = isWinning(newHand);
+        if (winner) {
+          await supabase.from("tables").update({ status: "finished" }).eq("id", tableId);
+          await supabase.from("game_messages").insert({
+            table_id: tableId,
+            player_id: userId,
+            type: "success",
+            message: `${userName} wins!`,
+          });
+        }
 
         return new Response(
           JSON.stringify({
@@ -478,15 +511,19 @@ Deno.serve(async (req: Request) => {
           });
         }
 
+        // Cannot draw freely when a penalty 2 is active — must use take-penalty
+        if (table.action_card && table.penalising_action_card) {
+          return new Response(JSON.stringify({ error: "Must take the penalty or play a 2" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
         let pack: string[] = [...(table.pack || [])];
         let cardsOnTable: string[] = [...(table.cards_on_table || [])];
         const hand: string[] = [...(player.hand || [])];
 
-        if (pack.length < 1) {
-          const lastCard = cardsOnTable.pop()!;
-          pack = shufflePack(cardsOnTable);
-          cardsOnTable = [lastCard];
-        }
+        ({ pack, cardsOnTable } = replenishPack(pack, cardsOnTable));
 
         const drawn = pack.slice(0, 1);
         pack = pack.slice(1);
@@ -510,7 +547,17 @@ Deno.serve(async (req: Request) => {
 
         await supabase
           .from("tables")
-          .update({ pack, cards_on_table: cardsOnTable, current_player_index: nextPlayerIndex, action_card: false, penalising_action_card: false, forced_draw: 0 })
+          .update({
+            pack,
+            cards_on_table: cardsOnTable,
+            current_player_index: nextPlayerIndex,
+            action_card: false,
+            penalising_action_card: false,
+            request_action_card: false,
+            forced_draw: 0,
+            suite_request: null,
+            number_request: null,
+          })
           .eq("id", tableId);
 
         await supabase.from("game_messages").insert({
@@ -542,17 +589,19 @@ Deno.serve(async (req: Request) => {
           .single();
 
         if (!table || !player) throw new Error("Table or player not found");
+        if (player.turn_finished) {
+          return new Response(JSON.stringify({ error: "Not your turn" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
 
         let pack: string[] = [...(table.pack || [])];
         let cardsOnTable: string[] = [...(table.cards_on_table || [])];
         const hand: string[] = [...(player.hand || [])];
         const forcedDraw = table.forced_draw || 2;
 
-        if (pack.length < forcedDraw) {
-          const lastCard = cardsOnTable.pop()!;
-          pack = shufflePack(cardsOnTable);
-          cardsOnTable = [lastCard];
-        }
+        ({ pack, cardsOnTable } = replenishPack(pack, cardsOnTable));
 
         const drawn = pack.slice(0, forcedDraw);
         pack = pack.slice(forcedDraw);
@@ -581,7 +630,10 @@ Deno.serve(async (req: Request) => {
             cards_on_table: cardsOnTable,
             action_card: false,
             penalising_action_card: false,
+            request_action_card: false,
             forced_draw: 0,
+            suite_request: null,
+            number_request: null,
             current_player_index: nextPlayerIndex,
           })
           .eq("id", tableId);
@@ -604,7 +656,7 @@ Deno.serve(async (req: Request) => {
 
         await supabase
           .from("tables")
-          .update({ suite_request: suite, request_action_card: true, action_card: true })
+          .update({ suite_request: suite, number_request: null, request_action_card: true, action_card: true })
           .eq("id", tableId);
 
         await supabase.from("game_messages").insert({
@@ -612,6 +664,26 @@ Deno.serve(async (req: Request) => {
           player_id: userId,
           type: "action",
           message: `${userName} requested suit: ${suite}`,
+        });
+
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      case "number-request": {
+        const { tableId, number } = body;
+
+        await supabase
+          .from("tables")
+          .update({ number_request: String(number), suite_request: null, request_action_card: true, action_card: true })
+          .eq("id", tableId);
+
+        await supabase.from("game_messages").insert({
+          table_id: tableId,
+          player_id: userId,
+          type: "action",
+          message: `${userName} requested number: ${number}`,
         });
 
         return new Response(JSON.stringify({ success: true }), {

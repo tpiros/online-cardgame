@@ -30,7 +30,8 @@ interface TableData {
   request_action_card: boolean
   penalising_action_card: boolean
   forced_draw: number
-  suite_request: string
+  suite_request: string | null
+  number_request: string | null
   current_player_index: number
 }
 
@@ -174,5 +175,16 @@ export function useGameState(tableId: string | null) {
     }
   }, [tableId, fetchState])
 
-  return { ...state, loading, error, playCard, drawCard, takePenalty, suiteRequest, refetch: fetchState }
+  const numberRequest = useCallback(async (number: number) => {
+    if (!tableId) return
+    setError(null)
+    try {
+      await gameApi.numberRequest(tableId, number)
+      await fetchState()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to make number request')
+    }
+  }, [tableId, fetchState])
+
+  return { ...state, loading, error, playCard, drawCard, takePenalty, suiteRequest, numberRequest, refetch: fetchState }
 }

@@ -1454,6 +1454,30 @@ body {
   box-shadow: 0 0 12px var(--accent-glow);
 }
 
+.game-number-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.game-number-btn {
+  padding: 10px 4px;
+  border-radius: 8px;
+  border: 1.5px solid var(--border);
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.game-number-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-card);
+}
+
 .game-suit-name {
   font-size: 11px;
   font-weight: 500;

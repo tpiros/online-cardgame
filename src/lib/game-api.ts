@@ -31,5 +31,7 @@ export const gameApi = {
   takePenalty: (tableId: string) => callGameServer('take-penalty', { tableId }),
   suiteRequest: (tableId: string, suite: string) =>
     callGameServer('suite-request', { tableId, suite }),
+  numberRequest: (tableId: string, number: number) =>
+    callGameServer('number-request', { tableId, number }),
   getGameState: (tableId: string) => callGameServer('get-game-state', { tableId }),
 }
