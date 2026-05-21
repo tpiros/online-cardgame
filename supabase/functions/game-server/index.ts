@@ -52,14 +52,6 @@ function isPenalisingActionCardPlayable(card: string, lastCard: string): boolean
   return getCardNumber(card) === 2 && getCardNumber(lastCard) === 2;
 }
 
-function hasCardNumberInHand(hand: string[], card: string): boolean {
-  return hand.some((c) => getCardNumber(c) === getCardNumber(card));
-}
-
-function hasSuitInHand(hand: string[], suit: string): boolean {
-  return hand.some((c) => getCardSuit(c) === suit);
-}
-
 function isWinning(hand: string[]): boolean {
   return hand.length === 0;
 }
@@ -96,10 +88,32 @@ Deno.serve(async (req: Request) => {
 
     const body = await req.json();
     const { action } = body;
+    const userId = user.id;
+    const userName = user.user_metadata?.name || user.email?.split("@")[0] || "Player";
+
+    // Ensure player record exists (idempotent upsert)
+    const ensurePlayer = async () => {
+      const { data: existingPlayer } = await supabase
+        .from("players")
+        .select("id")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (!existingPlayer) {
+        await supabase.from("players").insert({
+          id: userId,
+          name: userName,
+          status: "available",
+          hand: [],
+        });
+      }
+    };
 
     switch (action) {
       case "create-table": {
         const { name } = body;
+        await ensurePlayer();
+
         const pack = shufflePack(createPack());
         const { data: table, error } = await supabase
           .from("tables")
@@ -108,17 +122,51 @@ Deno.serve(async (req: Request) => {
           .single();
 
         if (error) throw error;
-        return new Response(JSON.stringify({ table }), {
+
+        // Creator automatically joins the table
+        await supabase
+          .from("players")
+          .update({ table_id: table.id, status: "intable" })
+          .eq("id", userId);
+
+        // Mark table unavailable if at player limit
+        const { count } = await supabase
+          .from("players")
+          .select("*", { count: "exact", head: true })
+          .eq("table_id", table.id);
+
+        if ((count ?? 0) >= table.player_limit) {
+          await supabase
+            .from("tables")
+            .update({ status: "unavailable" })
+            .eq("id", table.id);
+        }
+
+        await supabase.from("game_messages").insert({
+          table_id: table.id,
+          player_id: userId,
+          type: "info",
+          message: `${userName} created the table`,
+        });
+
+        const { data: updatedTable } = await supabase
+          .from("tables")
+          .select("*")
+          .eq("id", table.id)
+          .single();
+
+        return new Response(JSON.stringify({ table: updatedTable }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
       case "join-table": {
         const { tableId } = body;
+        await ensurePlayer();
 
         const { data: table } = await supabase
           .from("tables")
-          .select("*, players!players_table_id_fkey(*)")
+          .select("*")
           .eq("id", tableId)
           .single();
 
@@ -129,26 +177,26 @@ Deno.serve(async (req: Request) => {
           });
         }
 
-        const { data: existingPlayers } = await supabase
+        const { count: playerCount } = await supabase
           .from("players")
-          .select("*")
+          .select("*", { count: "exact", head: true })
           .eq("table_id", tableId);
 
-        const playerCount = existingPlayers?.length ?? 0;
-
-        if (table.status !== "available" || playerCount >= table.player_limit) {
-          return new Response(JSON.stringify({ error: "Table is full" }), {
+        if (table.status !== "available" || (playerCount ?? 0) >= table.player_limit) {
+          return new Response(JSON.stringify({ error: "Table is full or in progress" }), {
             status: 400,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
 
+        // Set player's table_id BEFORE inserting the message
+        // so the RLS policy on game_messages can verify membership
         await supabase
           .from("players")
           .update({ table_id: tableId, status: "intable" })
-          .eq("id", user.id);
+          .eq("id", userId);
 
-        const newPlayerCount = playerCount + 1;
+        const newPlayerCount = (playerCount ?? 0) + 1;
         if (newPlayerCount >= table.player_limit) {
           await supabase
             .from("tables")
@@ -158,9 +206,9 @@ Deno.serve(async (req: Request) => {
 
         await supabase.from("game_messages").insert({
           table_id: tableId,
-          player_id: user.id,
+          player_id: userId,
           type: "info",
-          message: "joined the table",
+          message: `${userName} joined the table`,
         });
 
         const { data: updatedTable } = await supabase
@@ -170,6 +218,54 @@ Deno.serve(async (req: Request) => {
           .single();
 
         return new Response(JSON.stringify({ table: updatedTable, playerCount: newPlayerCount }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      case "leave-table": {
+        const { tableId } = body;
+        await ensurePlayer();
+
+        // Clear player's table assignment
+        await supabase
+          .from("players")
+          .update({ table_id: null, status: "available", hand: [], turn_finished: false })
+          .eq("id", userId);
+
+        // Check remaining players
+        const { count: remainingCount } = await supabase
+          .from("players")
+          .select("*", { count: "exact", head: true })
+          .eq("table_id", tableId);
+
+        if ((remainingCount ?? 0) === 0) {
+          // No players left -- delete the table and its messages
+          await supabase.from("game_messages").delete().eq("table_id", tableId);
+          await supabase.from("tables").delete().eq("id", tableId);
+        } else {
+          // Reopen the table if it was full
+          const { data: table } = await supabase
+            .from("tables")
+            .select("status")
+            .eq("id", tableId)
+            .single();
+
+          if (table && table.status !== "playing") {
+            await supabase
+              .from("tables")
+              .update({ status: "available" })
+              .eq("id", tableId);
+          }
+
+          await supabase.from("game_messages").insert({
+            table_id: tableId,
+            player_id: userId,
+            type: "info",
+            message: `${userName} left the table`,
+          });
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
@@ -201,11 +297,9 @@ Deno.serve(async (req: Request) => {
         const firstCard = pack[0];
         pack = pack.slice(1);
 
-        const hands: Record<string, string[]> = {};
         for (const player of players) {
           const hand = pack.slice(0, 5);
           pack = pack.slice(5);
-          hands[player.id] = hand;
           await supabase
             .from("players")
             .update({ hand, status: "playing", turn_finished: false })
@@ -256,7 +350,7 @@ Deno.serve(async (req: Request) => {
         const { data: player } = await supabase
           .from("players")
           .select("*")
-          .eq("id", user.id)
+          .eq("id", userId)
           .single();
 
         if (!table || !player) throw new Error("Table or player not found");
@@ -321,13 +415,13 @@ Deno.serve(async (req: Request) => {
           .select("*")
           .eq("table_id", tableId);
 
-        const currentIdx = allPlayers!.findIndex((p) => p.id === user.id);
+        const currentIdx = allPlayers!.findIndex((p) => p.id === userId);
         const nextPlayerIndex = (currentIdx + 1) % allPlayers!.length;
 
-        await supabase.from("players").update({ hand: newHand, turn_finished: true }).eq("id", user.id);
+        await supabase.from("players").update({ hand: newHand, turn_finished: true }).eq("id", userId);
 
         for (const p of allPlayers!) {
-          if (p.id !== user.id) {
+          if (p.id !== userId) {
             await supabase.from("players").update({ turn_finished: false }).eq("id", p.id);
           }
         }
@@ -346,9 +440,9 @@ Deno.serve(async (req: Request) => {
 
         await supabase.from("game_messages").insert({
           table_id: tableId,
-          player_id: user.id,
+          player_id: userId,
           type: "action",
-          message: `played ${cardId}`,
+          message: `${userName} played ${cardId}`,
         });
 
         const winner = isWinning(newHand);
@@ -379,7 +473,7 @@ Deno.serve(async (req: Request) => {
         const { data: player } = await supabase
           .from("players")
           .select("*")
-          .eq("id", user.id)
+          .eq("id", userId)
           .single();
 
         if (!table || !player) throw new Error("Table or player not found");
@@ -409,13 +503,13 @@ Deno.serve(async (req: Request) => {
           .select("*")
           .eq("table_id", tableId);
 
-        const currentIdx = allPlayers!.findIndex((p) => p.id === user.id);
+        const currentIdx = allPlayers!.findIndex((p) => p.id === userId);
         const nextPlayerIndex = (currentIdx + 1) % allPlayers!.length;
 
-        await supabase.from("players").update({ hand: newHand, turn_finished: true }).eq("id", user.id);
+        await supabase.from("players").update({ hand: newHand, turn_finished: true }).eq("id", userId);
 
         for (const p of allPlayers!) {
-          if (p.id !== user.id) {
+          if (p.id !== userId) {
             await supabase.from("players").update({ turn_finished: false }).eq("id", p.id);
           }
         }
@@ -427,9 +521,9 @@ Deno.serve(async (req: Request) => {
 
         await supabase.from("game_messages").insert({
           table_id: tableId,
-          player_id: user.id,
+          player_id: userId,
           type: "info",
-          message: `drew a card`,
+          message: `${userName} drew a card`,
         });
 
         return new Response(
@@ -450,7 +544,7 @@ Deno.serve(async (req: Request) => {
         const { data: player } = await supabase
           .from("players")
           .select("*")
-          .eq("id", user.id)
+          .eq("id", userId)
           .single();
 
         if (!table || !player) throw new Error("Table or player not found");
@@ -475,13 +569,13 @@ Deno.serve(async (req: Request) => {
           .select("*")
           .eq("table_id", tableId);
 
-        const currentIdx = allPlayers!.findIndex((p) => p.id === user.id);
+        const currentIdx = allPlayers!.findIndex((p) => p.id === userId);
         const nextPlayerIndex = (currentIdx + 1) % allPlayers!.length;
 
-        await supabase.from("players").update({ hand: newHand, turn_finished: true }).eq("id", user.id);
+        await supabase.from("players").update({ hand: newHand, turn_finished: true }).eq("id", userId);
 
         for (const p of allPlayers!) {
-          if (p.id !== user.id) {
+          if (p.id !== userId) {
             await supabase.from("players").update({ turn_finished: false }).eq("id", p.id);
           }
         }
@@ -500,9 +594,9 @@ Deno.serve(async (req: Request) => {
 
         await supabase.from("game_messages").insert({
           table_id: tableId,
-          player_id: user.id,
+          player_id: userId,
           type: "action",
-          message: `took ${forcedDraw} penalty cards`,
+          message: `${userName} took ${forcedDraw} penalty cards`,
         });
 
         return new Response(
@@ -521,9 +615,9 @@ Deno.serve(async (req: Request) => {
 
         await supabase.from("game_messages").insert({
           table_id: tableId,
-          player_id: user.id,
+          player_id: userId,
           type: "action",
-          message: `requested suit: ${suite}`,
+          message: `${userName} requested suit: ${suite}`,
         });
 
         return new Response(JSON.stringify({ success: true }), {
@@ -552,8 +646,8 @@ Deno.serve(async (req: Request) => {
           .order("created_at", { ascending: false })
           .limit(50);
 
-        const myPlayer = players?.find((p) => p.id === user.id);
-        const otherPlayers = players?.filter((p) => p.id !== user.id);
+        const myPlayer = players?.find((p) => p.id === userId);
+        const otherPlayers = players?.filter((p) => p.id !== userId);
 
         return new Response(
           JSON.stringify({

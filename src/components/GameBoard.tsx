@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useGameState } from '../hooks/useGameState'
+import { gameApi } from '../lib/game-api'
 import { CardComponent } from './CardComponent'
 import { isCardPlayable, isPenalisingActionCardPlayable, getCardNumber } from '../lib/game-logic'
 import type { CardId } from '../types/game'
@@ -91,7 +92,7 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
             </svg>
             {packCount}
           </div>
-          <button onClick={onLeave} className="game-leave-btn">
+          <button onClick={async () => { await gameApi.leaveTable(tableId); onLeave() }} className="game-leave-btn">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
               <polyline points="16 17 21 12 16 7" />
@@ -315,7 +316,7 @@ export function GameBoard({ tableId, onLeave }: GameBoardProps) {
                 <p className="game-result-sub">Better luck next time</p>
               </>
             )}
-            <button onClick={onLeave} className="game-result-btn">
+            <button onClick={async () => { await gameApi.leaveTable(tableId); onLeave() }} className="game-result-btn">
               Back to Lobby
             </button>
           </div>

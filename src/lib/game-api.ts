@@ -23,6 +23,7 @@ async function callGameServer(action: string, body: Record<string, unknown> = {}
 export const gameApi = {
   createTable: (name: string) => callGameServer('create-table', { name }),
   joinTable: (tableId: string) => callGameServer('join-table', { tableId }),
+  leaveTable: (tableId: string) => callGameServer('leave-table', { tableId }),
   startGame: (tableId: string) => callGameServer('start-game', { tableId }),
   playCard: (tableId: string, cardIndex: number, cardId: string) =>
     callGameServer('play-card', { tableId, cardIndex, cardId }),

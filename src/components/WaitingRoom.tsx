@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { gameApi } from '../lib/game-api'
-import { useAuth } from '../hooks/useAuth'
 
 interface WaitingRoomProps {
   tableId: string
@@ -10,10 +9,10 @@ interface WaitingRoomProps {
 }
 
 export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps) {
-  const { user } = useAuth()
   const [playerCount, setPlayerCount] = useState(0)
   const [playerNames, setPlayerNames] = useState<string[]>([])
   const [starting, setStarting] = useState(false)
+  const [leaving, setLeaving] = useState(false)
 
   useEffect(() => {
     const fetchPlayers = async () => {
@@ -35,10 +34,13 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
           onGameStart()
         }
       })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'tables', filter: `id=eq.${tableId}` }, () => {
+        onLeave()
+      })
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [tableId, onGameStart])
+  }, [tableId, onGameStart, onLeave])
 
   const handleStart = async () => {
     setStarting(true)
@@ -53,14 +55,15 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
   }
 
   const handleLeave = async () => {
-    await supabase.from('players').update({ table_id: null, status: 'available' }).eq('id', user?.id)
-    const { data: remainingPlayers } = await supabase.from('players').select('id').eq('table_id', tableId)
-    if (!remainingPlayers || remainingPlayers.length === 0) {
-      await supabase.from('tables').delete().eq('id', tableId)
-    } else {
-      await supabase.from('tables').update({ status: 'available' }).eq('id', tableId)
+    setLeaving(true)
+    try {
+      await gameApi.leaveTable(tableId)
+      onLeave()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLeaving(false)
     }
-    onLeave()
   }
 
   const progress = (playerCount / 2) * 100
@@ -137,8 +140,8 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
               )}
             </button>
           )}
-          <button onClick={handleLeave} className="waiting-leave-btn">
-            Leave Table
+          <button onClick={handleLeave} disabled={leaving} className="waiting-leave-btn">
+            {leaving ? 'Leaving...' : 'Leave Table'}
           </button>
         </div>
       </div>

@@ -40,13 +40,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       options: { data: { name } },
     })
     if (error) throw error
-
-    await supabase.from('players').upsert({
-      id: (await supabase.auth.getUser()).data.user?.id,
-      name,
-      status: 'available',
-      hand: [],
-    })
+    // Player record is created by the edge function on first action
+    // (create-table or join-table). No need to create it here.
   }
 
   const signIn = async (email: string, password: string) => {

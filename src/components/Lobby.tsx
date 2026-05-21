@@ -9,6 +9,7 @@ interface TableInfo {
   status: string
   player_limit: number
   created_at: string
+  player_count?: number
 }
 
 interface LobbyProps {
@@ -26,18 +27,38 @@ export function Lobby({ onJoinTable }: LobbyProps) {
 
   useEffect(() => {
     fetchTables()
+
     const channel = supabase.channel('lobby')
     channel
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tables' }, () => {
         fetchTables()
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'players' }, () => {
+        fetchTables()
+      })
       .subscribe()
+
     return () => { supabase.removeChannel(channel) }
   }, [])
 
   const fetchTables = async () => {
-    const { data } = await supabase.from('tables').select('*').order('created_at', { ascending: false })
-    setTables(data || [])
+    const { data: tableData } = await supabase.from('tables').select('*').order('created_at', { ascending: false })
+    const { data: playerData } = await supabase.from('players').select('table_id')
+
+    // Count players per table
+    const countMap: Record<string, number> = {}
+    for (const p of playerData || []) {
+      if (p.table_id) {
+        countMap[p.table_id] = (countMap[p.table_id] || 0) + 1
+      }
+    }
+
+    const enriched = (tableData || []).map((t: TableInfo) => ({
+      ...t,
+      player_count: countMap[t.id] || 0,
+    }))
+
+    setTables(enriched)
     setLoading(false)
   }
 
@@ -46,7 +67,7 @@ export function Lobby({ onJoinTable }: LobbyProps) {
     setError(null)
     try {
       const result = await gameApi.createTable(tableName || 'Game Table')
-      await joinTable(result.table.id)
+      onJoinTable(result.table.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create table')
     } finally {
@@ -173,7 +194,7 @@ export function Lobby({ onJoinTable }: LobbyProps) {
             <div className="lobby-table-grid">
               {tables.map((table) => {
                 const cfg = statusConfig[table.status] || statusConfig.available
-                const canJoin = table.status === 'available'
+                const canJoin = table.status === 'available' && (table.player_count ?? 0) < table.player_limit
                 return (
                   <div key={table.id} className={`lobby-table-card ${canJoin ? 'lobby-table-joinable' : ''}`}>
                     <div className="lobby-table-card-top">
@@ -196,7 +217,7 @@ export function Lobby({ onJoinTable }: LobbyProps) {
                           <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
                           <path d="M16 3.13a4 4 0 0 1 0 7.75" />
                         </svg>
-                        <span>0 / {table.player_limit}</span>
+                        <span>{table.player_count ?? 0} / {table.player_limit}</span>
                       </div>
                       <button
                         onClick={() => joinTable(table.id)}
