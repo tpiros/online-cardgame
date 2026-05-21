@@ -109,6 +109,7 @@ export function useGameState(tableId: string | null) {
           ...prev,
           messages: [{ ...payload.new as GameMessage }, ...prev.messages].slice(0, 50),
         }))
+        fetchState()
       })
       .subscribe()
 
