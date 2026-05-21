@@ -359,6 +359,16 @@ Deno.serve(async (req: Request) => {
               headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
           }
+        } else if (table.request_action_card && table.suite_request) {
+          // Must play the requested suit, or another ace to re-request
+          const cardNum = getCardNumber(cardId);
+          const cardSuit = getCardSuit(cardId);
+          if (cardNum !== 1 && cardSuit !== table.suite_request) {
+            return new Response(JSON.stringify({ error: `Must play ${table.suite_request} suit or an Ace` }), {
+              status: 400,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
         } else if (!isCardPlayable(cardId, lastCard)) {
           return new Response(JSON.stringify({ error: "Card not playable" }), {
             status: 400,
@@ -374,19 +384,23 @@ Deno.serve(async (req: Request) => {
         let penalisingActionCard = table.penalising_action_card;
         let requestActionCard = table.request_action_card;
         let forcedDraw = table.forced_draw;
+        let suiteRequest: string | null = table.suite_request;
 
         if (getCardNumber(cardId) === 2) {
           actionCard = true;
           penalisingActionCard = true;
           forcedDraw += 2;
+          suiteRequest = null;
         } else if (getCardNumber(cardId) === 1) {
           actionCard = true;
           requestActionCard = true;
+          // suiteRequest will be set by the follow-up suite-request action
         } else {
           actionCard = false;
           penalisingActionCard = false;
           requestActionCard = false;
           forcedDraw = 0;
+          suiteRequest = null;
         }
 
         const { data: allPlayers } = await supabase
@@ -413,6 +427,7 @@ Deno.serve(async (req: Request) => {
             penalising_action_card: penalisingActionCard,
             request_action_card: requestActionCard,
             forced_draw: forcedDraw,
+            suite_request: suiteRequest,
             current_player_index: nextPlayerIndex,
           })
           .eq("id", tableId);

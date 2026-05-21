@@ -55,6 +55,7 @@ export function Lobby({ onJoinTable }: LobbyProps) {
       const { data: playerData, error: playerError } = await supabase
         .from('players')
         .select('table_id')
+        .in('status', ['intable', 'playing'])
 
       if (playerError) throw playerError
 
