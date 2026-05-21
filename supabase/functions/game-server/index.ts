@@ -123,24 +123,11 @@ Deno.serve(async (req: Request) => {
 
         if (error) throw error;
 
-        // Creator automatically joins the table
+        // Creator automatically joins the table (1 player so far)
         await supabase
           .from("players")
           .update({ table_id: table.id, status: "intable" })
           .eq("id", userId);
-
-        // Mark table unavailable if at player limit
-        const { count } = await supabase
-          .from("players")
-          .select("*", { count: "exact", head: true })
-          .eq("table_id", table.id);
-
-        if ((count ?? 0) >= table.player_limit) {
-          await supabase
-            .from("tables")
-            .update({ status: "unavailable" })
-            .eq("id", table.id);
-        }
 
         await supabase.from("game_messages").insert({
           table_id: table.id,
