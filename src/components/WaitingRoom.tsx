@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { gameApi } from '../lib/game-api'
 
@@ -13,6 +13,7 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
   const [playerNames, setPlayerNames] = useState<string[]>([])
   const [starting, setStarting] = useState(false)
   const [leaving, setLeaving] = useState(false)
+  const transitionedRef = useRef(false)
 
   useEffect(() => {
     const fetchTableState = async () => {
@@ -23,24 +24,17 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
       }
       const { data: table } = await supabase.from('tables').select('status').eq('id', tableId).maybeSingle()
       if (!table) {
-        onLeave()
+        if (!transitionedRef.current) { transitionedRef.current = true; onLeave() }
       } else if (table.status === 'playing') {
-        onGameStart()
+        if (!transitionedRef.current) { transitionedRef.current = true; onGameStart() }
       }
     }
     fetchTableState()
 
     const channel = supabase.channel(`waiting-${tableId}`)
     channel
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `table_id=eq.${tableId}` }, () => {
-        fetchTableState()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tables', filter: `id=eq.${tableId}` }, () => {
-        fetchTableState()
-      })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_messages', filter: `table_id=eq.${tableId}` }, () => {
-        fetchTableState()
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `table_id=eq.${tableId}` }, fetchTableState)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tables', filter: `id=eq.${tableId}` }, fetchTableState)
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
@@ -50,10 +44,9 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
     setStarting(true)
     try {
       await gameApi.startGame(tableId)
-      onGameStart()
+      if (!transitionedRef.current) { transitionedRef.current = true; onGameStart() }
     } catch (err) {
       console.error(err)
-    } finally {
       setStarting(false)
     }
   }
@@ -65,7 +58,6 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
       onLeave()
     } catch (err) {
       console.error(err)
-    } finally {
       setLeaving(false)
     }
   }
@@ -75,7 +67,6 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
   return (
     <div className="waiting-page">
       <div className="waiting-card">
-        {/* Animated card decoration */}
         <div className="waiting-deco">
           <div className="waiting-deco-card waiting-deco-card-1">
             <span style={{ color: '#dc2626', fontSize: 32 }}>{'\u2665'}</span>
@@ -90,22 +81,15 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
 
         <h2 className="waiting-title">Waiting for Players</h2>
 
-        {/* Progress bar */}
         <div className="waiting-progress-track">
-          <div
-            className="waiting-progress-fill"
-            style={{ width: `${progress}%` }}
-          />
+          <div className="waiting-progress-fill" style={{ width: `${progress}%` }} />
         </div>
         <p className="waiting-count">{playerCount}/2 players joined</p>
 
-        {/* Player list */}
         <div className="waiting-players">
           {playerNames.map((name, i) => (
             <div key={i} className="waiting-player" style={{ animationDelay: `${i * 0.1}s` }}>
-              <div className="waiting-player-avatar">
-                {name[0]?.toUpperCase()}
-              </div>
+              <div className="waiting-player-avatar">{name[0]?.toUpperCase()}</div>
               <span className="waiting-player-name">{name}</span>
               <span className="waiting-player-ready">Ready</span>
             </div>
@@ -122,14 +106,9 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
           )}
         </div>
 
-        {/* Actions */}
         <div className="waiting-actions">
           {playerCount >= 2 && (
-            <button
-              onClick={handleStart}
-              disabled={starting}
-              className="waiting-start-btn"
-            >
+            <button onClick={handleStart} disabled={starting} className="waiting-start-btn">
               {starting ? (
                 <span className="lobby-btn-loading">
                   <span className="auth-spinner" /> Starting...

@@ -262,6 +262,13 @@ Deno.serve(async (req: Request) => {
 
         if (!table) throw new Error("Table not found");
 
+        // Idempotent: if already playing, just return success
+        if (table.status === "playing") {
+          return new Response(JSON.stringify({ alreadyStarted: true }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
         const { data: players } = await supabase
           .from("players")
           .select("*")
