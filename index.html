@@ -1,16 +1,821 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Macaonline - Card Game</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Macaonline - Card Game</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app"></div>
+
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
+
+    // ── Config ────────────────────────────────────────────────────────────────
+    const SUPABASE_URL  = import.meta.env.VITE_SUPABASE_URL
+    const SUPABASE_ANON = import.meta.env.VITE_SUPABASE_ANON_KEY
+    const FUNCTION_URL  = `${SUPABASE_URL}/functions/v1/game-server`
+    const supabase      = createClient(SUPABASE_URL, SUPABASE_ANON)
+
+    // ── App state ─────────────────────────────────────────────────────────────
+    const app = document.getElementById('app')
+    let currentView   = 'auth'
+    let currentUser   = null
+    let currentTableId = null
+    let realtimeChannel = null
+
+    // ── Card helpers ──────────────────────────────────────────────────────────
+    const SUIT_SYM  = { H: '♥', C: '♣', S: '♠', D: '♦' }
+    const SUIT_COL  = { H: '#dc2626', C: '#1e293b', S: '#1e293b', D: '#dc2626' }
+    const SUIT_NAME = { H: 'Hearts', C: 'Clubs', S: 'Spades', D: 'Diamonds' }
+    const NUM_NAME  = { 1:'Ace', 11:'Jack', 12:'Queen', 13:'King' }
+
+    const cardNum   = c => parseInt(c)
+    const cardSuit  = c => c.slice(-1)
+    const numLabel  = n => NUM_NAME[n] || String(n)
+    const esc       = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+
+    function canPlay(card, last, table) {
+      if (!last) return true
+      const pen  = table.penalising_action_card && table.action_card
+      const suit = table.request_action_card && table.action_card && table.suite_request
+      const num  = table.request_action_card && table.action_card && table.number_request
+      if (pen)  return cardNum(card) === 2 && cardNum(last) === 2
+      if (suit) return cardNum(card) === 1 || cardSuit(card) === table.suite_request
+      if (num)  return cardNum(card) === 13 || cardNum(card) === parseInt(table.number_request)
+      return cardNum(card) === cardNum(last) || cardSuit(card) === cardSuit(last)
+    }
+
+    function cardFace(card, size, playable = false) {
+      const n   = cardNum(card), s = cardSuit(card)
+      const sym = SUIT_SYM[s], col = SUIT_COL[s], lbl = numLabel(n)
+      const sz  = { sm: 'card-sm', md: 'card-md', lg: 'card-lg' }[size] || 'card-md'
+      return `<div class="card ${sz}${playable ? ' card-playable' : ''}">
+        <div class="card-inner">
+          <div class="card-corner card-corner-top">
+            <span class="card-corner-num" style="color:${col}">${lbl}</span>
+            <span style="color:${col};font-size:11px;line-height:1">${sym}</span>
+          </div>
+          <span class="card-center-suit" style="color:${col}">${sym}</span>
+          <div class="card-corner card-corner-bottom">
+            <span class="card-corner-num" style="color:${col}">${lbl}</span>
+            <span style="color:${col};font-size:11px;line-height:1">${sym}</span>
+          </div>
+        </div>
+      </div>`
+    }
+
+    function cardBack(size) {
+      const sz = { sm: 'card-sm', md: 'card-md', lg: 'card-lg' }[size] || 'card-md'
+      return `<div class="card ${sz} card-facedown"><div class="card-facedown-inner">★</div></div>`
+    }
+
+    // ── API wrapper ───────────────────────────────────────────────────────────
+    async function api(action, body = {}) {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) throw new Error('Not authenticated')
+      const res = await fetch(FUNCTION_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+        body: JSON.stringify({ action, ...body }),
+      })
+      const result = await res.json()
+      if (result.error) throw new Error(result.error)
+      return result
+    }
+
+    // ── View switcher ─────────────────────────────────────────────────────────
+    function go(view, tableId = null) {
+      if (realtimeChannel) { supabase.removeChannel(realtimeChannel); realtimeChannel = null }
+      currentView    = view
+      currentTableId = tableId
+      app.innerHTML  = ''
+      if (view === 'auth')    showAuth()
+      else if (view === 'lobby')   showLobby()
+      else if (view === 'waiting') showWaiting()
+      else if (view === 'game')    showGame()
+    }
+
+    // =========================================================================
+    // AUTH VIEW
+    // =========================================================================
+    function showAuth() {
+      let mode = 'signin'
+
+      app.innerHTML = `
+        <div class="auth-page">
+          <div class="auth-bg-orb auth-bg-orb-1"></div>
+          <div class="auth-bg-orb auth-bg-orb-2"></div>
+          <div class="auth-bg-orb auth-bg-orb-3"></div>
+          <div class="auth-card">
+            <div class="auth-logo">
+              <div class="auth-logo-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+                  <rect x="2" y="4" width="20" height="16" rx="2"/>
+                  <path d="M12 8v8M8 12h8"/>
+                </svg>
+              </div>
+              <h1 class="auth-title">Macaonline</h1>
+            </div>
+            <p class="auth-subtitle" id="auth-sub">Sign in to play</p>
+            <div id="auth-err" class="auth-error" style="display:none"></div>
+            <form class="auth-form" id="auth-form">
+              <div class="auth-field" id="name-field" style="display:none">
+                <label class="auth-label">Display Name</label>
+                <div class="auth-input-wrap">
+                  <svg class="auth-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  <input class="auth-input" id="name-in" type="text" placeholder="Your name" />
+                </div>
+              </div>
+              <div class="auth-field">
+                <label class="auth-label">Email</label>
+                <div class="auth-input-wrap">
+                  <svg class="auth-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                  <input class="auth-input" id="email-in" type="email" placeholder="you@example.com" required />
+                </div>
+              </div>
+              <div class="auth-field">
+                <label class="auth-label">Password</label>
+                <div class="auth-input-wrap">
+                  <svg class="auth-input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  <input class="auth-input" id="pass-in" type="password" placeholder="••••••••" required />
+                </div>
+              </div>
+              <button class="auth-submit" type="submit" id="auth-btn">Sign In</button>
+            </form>
+            <div class="auth-switch">
+              <span id="switch-txt">Don't have an account?</span>
+              <button class="auth-switch-btn" id="mode-toggle">Sign Up</button>
+            </div>
+          </div>
+        </div>`
+
+      document.getElementById('mode-toggle').onclick = () => {
+        mode = mode === 'signin' ? 'signup' : 'signin'
+        const signup = mode === 'signup'
+        document.getElementById('name-field').style.display = signup ? '' : 'none'
+        document.getElementById('auth-sub').textContent     = signup ? 'Create an account' : 'Sign in to play'
+        document.getElementById('auth-btn').textContent     = signup ? 'Sign Up' : 'Sign In'
+        document.getElementById('switch-txt').textContent   = signup ? 'Already have an account?' : "Don't have an account?"
+        document.getElementById('mode-toggle').textContent  = signup ? 'Sign In' : 'Sign Up'
+        document.getElementById('auth-err').style.display   = 'none'
+      }
+
+      document.getElementById('auth-form').onsubmit = async e => {
+        e.preventDefault()
+        const err  = document.getElementById('auth-err')
+        const btn  = document.getElementById('auth-btn')
+        err.style.display = 'none'
+        btn.disabled = true
+        btn.innerHTML = '<span class="auth-spinner"></span> Loading...'
+        const email = document.getElementById('email-in').value.trim()
+        const pass  = document.getElementById('pass-in').value
+        const name  = document.getElementById('name-in').value.trim()
+        try {
+          if (mode === 'signup') {
+            const { error } = await supabase.auth.signUp({ email, password: pass, options: { data: { name: name || email.split('@')[0] } } })
+            if (error) throw error
+          } else {
+            const { error } = await supabase.auth.signInWithPassword({ email, password: pass })
+            if (error) throw error
+          }
+        } catch (e) {
+          err.textContent = e.message
+          err.style.display = 'flex'
+          btn.disabled = false
+          btn.textContent = mode === 'signup' ? 'Sign Up' : 'Sign In'
+        }
+      }
+    }
+
+    // =========================================================================
+    // LOBBY VIEW
+    // =========================================================================
+    async function showLobby() {
+      const { data: { user } } = await supabase.auth.getUser()
+      currentUser = user
+      const uname = user.user_metadata?.name || user.email.split('@')[0]
+
+      app.innerHTML = `
+        <div class="lobby-page">
+          <header class="lobby-header">
+            <div class="lobby-header-left">
+              <div class="lobby-brand">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/></svg>
+                <span class="lobby-brand-text">Macaonline</span>
+              </div>
+            </div>
+            <div class="lobby-header-right">
+              <div class="lobby-user-badge">
+                <div class="lobby-user-avatar">${uname[0].toUpperCase()}</div>
+                <span class="lobby-user-name">${esc(uname)}</span>
+              </div>
+              <button class="lobby-signout-btn" id="signout-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                Sign Out
+              </button>
+            </div>
+          </header>
+          <main class="lobby-main">
+            <div class="lobby-create">
+              <div class="lobby-create-card">
+                <div class="lobby-create-header">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  <span class="lobby-create-title">New Table</span>
+                </div>
+                <div class="lobby-create-form">
+                  <input class="lobby-input" id="tname-in" type="text" placeholder="Table name (optional)" maxlength="30" />
+                  <button class="lobby-create-btn" id="create-btn">Create Table</button>
+                </div>
+                <div id="lobby-err" class="lobby-error" style="display:none"></div>
+              </div>
+            </div>
+            <div class="lobby-tables">
+              <div class="lobby-tables-header">
+                <span class="lobby-tables-title">Open Tables</span>
+                <span class="lobby-tables-count" id="tcount">0 tables</span>
+              </div>
+              <div id="tables-grid" class="lobby-table-grid">
+                <div class="lobby-loading">Loading tables...</div>
+              </div>
+            </div>
+          </main>
+        </div>`
+
+      document.getElementById('signout-btn').onclick = () => supabase.auth.signOut()
+
+      document.getElementById('create-btn').onclick = async () => {
+        const btn  = document.getElementById('create-btn')
+        const err  = document.getElementById('lobby-err')
+        const name = document.getElementById('tname-in').value.trim()
+        btn.disabled = true
+        btn.innerHTML = '<span class="auth-spinner"></span> Creating...'
+        err.style.display = 'none'
+        try {
+          const { table } = await api('create-table', { name })
+          currentTableId = table.id
+          go('waiting', table.id)
+        } catch (e) {
+          err.textContent = e.message
+          err.style.display = 'block'
+          btn.disabled = false
+          btn.textContent = 'Create Table'
+        }
+      }
+
+      async function loadTables() {
+        const { data: tables } = await supabase
+          .from('tables').select('id,name,status,player_limit,created_at')
+          .in('status', ['available', 'playing'])
+          .order('created_at', { ascending: false })
+
+        const { data: players } = await supabase
+          .from('players').select('table_id').in('status', ['intable', 'playing'])
+
+        const counts = {}
+        for (const p of players || []) if (p.table_id) counts[p.table_id] = (counts[p.table_id] || 0) + 1
+
+        const grid  = document.getElementById('tables-grid')
+        const tcount = document.getElementById('tcount')
+        if (!grid) return
+
+        const list = tables || []
+        tcount.textContent = `${list.length} table${list.length !== 1 ? 's' : ''}`
+
+        if (!list.length) {
+          grid.innerHTML = '<div class="lobby-empty"><p>No tables yet</p><p class="lobby-empty-sub">Create one to get started</p></div>'
+          return
+        }
+
+        grid.innerHTML = list.map(t => {
+          const cnt  = counts[t.id] || 0
+          const full = cnt >= t.player_limit
+          const play = t.status === 'playing'
+          const join = !full && !play
+          let label, dot
+          if (play)      { label = 'In Progress'; dot = 'lobby-dot-playing' }
+          else if (full) { label = 'Full';        dot = 'lobby-dot-full' }
+          else           { label = 'Open';        dot = 'lobby-dot-open' }
+          return `
+            <div class="lobby-table-card${join ? ' lobby-table-joinable' : ''}">
+              <div class="lobby-table-card-top">
+                <div class="lobby-table-icon">${t.name[0].toUpperCase()}</div>
+                <div class="lobby-table-info">
+                  <div class="lobby-table-name">${esc(t.name)}</div>
+                  <div class="lobby-status"><span class="lobby-status-dot ${dot}"></span>${label}</div>
+                </div>
+              </div>
+              <div class="lobby-table-card-bottom">
+                <span class="lobby-table-players">${cnt}/${t.player_limit} players</span>
+                ${join
+                  ? `<button class="lobby-join-btn" data-id="${t.id}">Join</button>`
+                  : `<span class="lobby-join-btn lobby-join-disabled">Unavailable</span>`}
+              </div>
+            </div>`
+        }).join('')
+
+        grid.querySelectorAll('.lobby-join-btn[data-id]').forEach(btn => {
+          btn.onclick = async () => {
+            btn.disabled = true; btn.textContent = 'Joining...'
+            try {
+              await api('join-table', { tableId: btn.dataset.id })
+              go('waiting', btn.dataset.id)
+            } catch (e) {
+              btn.disabled = false; btn.textContent = 'Join'
+              const err = document.getElementById('lobby-err')
+              err.textContent = e.message; err.style.display = 'block'
+            }
+          }
+        })
+      }
+
+      loadTables()
+      realtimeChannel = supabase.channel('lobby')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'tables' }, loadTables)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'players' }, loadTables)
+        .subscribe()
+    }
+
+    // =========================================================================
+    // WAITING ROOM VIEW
+    // =========================================================================
+    function showWaiting() {
+      let gone = false
+
+      app.innerHTML = `
+        <div class="waiting-page">
+          <div class="waiting-card">
+            <div class="waiting-deco">
+              <div class="waiting-deco-card waiting-deco-card-1"><span style="color:#dc2626;font-size:32px">♥</span></div>
+              <div class="waiting-deco-card waiting-deco-card-2"><span style="color:#1e293b;font-size:32px">♠</span></div>
+              <div class="waiting-deco-card waiting-deco-card-3"><span style="color:#dc2626;font-size:32px">♦</span></div>
+            </div>
+            <h2 class="waiting-title">Waiting for Players</h2>
+            <div class="waiting-progress-track">
+              <div class="waiting-progress-fill" id="wprog" style="width:0%"></div>
+            </div>
+            <p class="waiting-count" id="wcount">0/2 players joined</p>
+            <div class="waiting-players" id="wplayers"></div>
+            <div class="waiting-actions">
+              <button class="waiting-start-btn" id="start-btn" style="display:none">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Start Game
+              </button>
+              <button class="waiting-leave-btn" id="wleave-btn">Leave Table</button>
+            </div>
+          </div>
+        </div>`
+
+      async function poll() {
+        const { data: players } = await supabase.from('players').select('name').eq('table_id', currentTableId)
+        const { data: table   } = await supabase.from('tables').select('status').eq('id', currentTableId).maybeSingle()
+
+        if (!table) { if (!gone) { gone = true; go('lobby') } return }
+        if (table.status === 'playing') { if (!gone) { gone = true; go('game', currentTableId) } return }
+
+        const cnt   = players?.length || 0
+        const prog  = document.getElementById('wprog')
+        const wc    = document.getElementById('wcount')
+        const wp    = document.getElementById('wplayers')
+        const sbtn  = document.getElementById('start-btn')
+        if (!prog) return
+
+        prog.style.width  = `${(cnt / 2) * 100}%`
+        wc.textContent    = `${cnt}/2 players joined`
+        sbtn.style.display = cnt >= 2 ? '' : 'none'
+
+        wp.innerHTML = (players || []).map(p => `
+          <div class="waiting-player">
+            <div class="waiting-player-avatar">${p.name[0].toUpperCase()}</div>
+            <span class="waiting-player-name">${esc(p.name)}</span>
+            <span class="waiting-player-ready">Ready</span>
+          </div>`).join('') + (cnt < 2 ? `
+          <div class="waiting-player waiting-player-empty">
+            <div class="waiting-player-avatar waiting-player-avatar-empty">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            </div>
+            <span class="waiting-player-name" style="opacity:.4">Waiting...</span>
+          </div>` : '')
+      }
+
+      poll()
+
+      document.getElementById('start-btn').onclick = async () => {
+        const btn = document.getElementById('start-btn')
+        btn.disabled = true
+        btn.innerHTML = '<span class="auth-spinner"></span> Starting...'
+        try {
+          await api('start-game', { tableId: currentTableId })
+          if (!gone) { gone = true; go('game', currentTableId) }
+        } catch (e) {
+          btn.disabled = false
+          btn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Start Game'
+        }
+      }
+
+      document.getElementById('wleave-btn').onclick = async () => {
+        await api('leave-table', { tableId: currentTableId })
+        go('lobby')
+      }
+
+      realtimeChannel = supabase.channel(`wait-${currentTableId}`)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `table_id=eq.${currentTableId}` }, poll)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'tables',  filter: `id=eq.${currentTableId}` },      poll)
+        .subscribe()
+    }
+
+    // =========================================================================
+    // GAME VIEW
+    // =========================================================================
+    function showGame() {
+      let gs = null
+      let pendingCard = null  // { index, card } waiting for suit/num dialog
+
+      app.innerHTML = `
+        <div class="game-page">
+          <header class="game-topbar">
+            <div class="game-topbar-left">
+              <div class="game-table-name" id="g-tname">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/></svg>
+                ...
+              </div>
+              <div class="game-turn-badge game-turn-waiting" id="g-badge">
+                <span class="game-turn-dot"></span><span id="g-turn">...</span>
+              </div>
+            </div>
+            <div class="game-topbar-right">
+              <div class="game-deck-count">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="4" y1="12" x2="20" y2="12"/></svg>
+                <span id="g-pack">—</span>
+              </div>
+              <button class="game-leave-btn" id="g-leave">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                Leave
+              </button>
+            </div>
+          </header>
+
+          <div id="g-err" class="game-error-toast" style="display:none"></div>
+
+          <div class="game-table">
+            <div class="game-opponent-area">
+              <div class="game-player-info">
+                <div class="game-player-avatar game-player-avatar-opponent" id="g-oav">?</div>
+                <div>
+                  <div class="game-player-name" id="g-oname">Opponent</div>
+                  <div class="game-player-cards" id="g-ocards">— cards</div>
+                </div>
+              </div>
+              <div class="game-opponent-hand" id="g-ohand"></div>
+            </div>
+
+            <div class="game-center">
+              <button class="game-draw-pile" id="g-draw" disabled>
+                <div class="game-draw-stack">
+                  <div class="game-draw-card game-draw-card-3"></div>
+                  <div class="game-draw-card game-draw-card-2"></div>
+                  <div class="game-draw-card game-draw-card-1"></div>
+                </div>
+                <span class="game-draw-label">DRAW</span>
+              </button>
+              <div class="game-discard">
+                <div id="g-discard"><div class="game-discard-empty">No cards yet</div></div>
+                <div class="game-suite-request" id="g-req" style="display:none"></div>
+              </div>
+            </div>
+
+            <div class="game-actions" id="g-actions"></div>
+
+            <div class="game-player-area">
+              <div class="game-player-info">
+                <div class="game-player-avatar game-player-avatar-me" id="g-mav">?</div>
+                <div>
+                  <div class="game-player-name" id="g-mname">You</div>
+                  <div class="game-player-cards" id="g-mcards">— cards</div>
+                </div>
+              </div>
+              <div class="game-hand" id="g-hand"></div>
+            </div>
+          </div>
+
+          <div class="game-log"><div class="game-log-inner" id="g-log"></div></div>
+        </div>
+
+        <!-- Suit dialog -->
+        <div class="game-overlay" id="suit-dlg" style="display:none">
+          <div class="game-dialog">
+            <h3 class="game-dialog-title">Request a Suit</h3>
+            <p class="game-dialog-sub">Choose the suit your opponent must play</p>
+            <div class="game-suit-grid" id="suit-grid"></div>
+            <div class="game-dialog-actions">
+              <button class="game-dialog-cancel" id="suit-cancel">Cancel</button>
+              <button class="game-dialog-confirm" id="suit-ok" disabled>Confirm</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Number dialog -->
+        <div class="game-overlay" id="num-dlg" style="display:none">
+          <div class="game-dialog">
+            <h3 class="game-dialog-title">Request a Number</h3>
+            <p class="game-dialog-sub">Choose the number your opponent must play</p>
+            <div class="game-number-grid" id="num-grid"></div>
+            <div class="game-dialog-actions">
+              <button class="game-dialog-cancel" id="num-cancel">Cancel</button>
+              <button class="game-dialog-confirm" id="num-ok" disabled>Confirm</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Result overlay -->
+        <div class="game-overlay" id="result-dlg" style="display:none">
+          <div class="game-result" id="result-inner"></div>
+        </div>`
+
+      // ── Suit dialog ──────────────────────────────────────────────────────────
+      let chosenSuit = null
+      const suitGrid = document.getElementById('suit-grid');
+      ['H','C','S','D'].forEach(s => {
+        const b = document.createElement('button')
+        b.className = 'game-suit-btn'
+        b.innerHTML = `<span style="color:${SUIT_COL[s]};font-size:32px">${SUIT_SYM[s]}</span><span class="game-suit-name">${SUIT_NAME[s]}</span>`
+        b.onclick = () => {
+          chosenSuit = s
+          suitGrid.querySelectorAll('.game-suit-btn').forEach(x => x.classList.remove('game-suit-btn-selected'))
+          b.classList.add('game-suit-btn-selected')
+          document.getElementById('suit-ok').disabled = false
+        }
+        suitGrid.appendChild(b)
+      })
+
+      function closeSuitDlg() {
+        chosenSuit = null; pendingCard = null
+        document.getElementById('suit-dlg').style.display = 'none'
+        document.getElementById('suit-ok').disabled = true
+        suitGrid.querySelectorAll('.game-suit-btn').forEach(x => x.classList.remove('game-suit-btn-selected'))
+      }
+      document.getElementById('suit-cancel').onclick = closeSuitDlg
+      document.getElementById('suit-ok').onclick = async () => {
+        if (!chosenSuit || !pendingCard) return
+        const { index, card } = pendingCard
+        closeSuitDlg()
+        await playCard(index, card)
+        await api('suite-request', { tableId: currentTableId, suite: chosenSuit })
+        await refresh()
+      }
+
+      // ── Number dialog ────────────────────────────────────────────────────────
+      let chosenNum = null
+      const numGrid = document.getElementById('num-grid');
+      [1,2,3,4,5,6,7,8,9,10,11,12].forEach(n => {
+        const b = document.createElement('button')
+        b.className = 'game-number-btn'
+        b.textContent = numLabel(n)
+        b.onclick = () => {
+          chosenNum = n
+          numGrid.querySelectorAll('.game-number-btn').forEach(x => x.classList.remove('game-suit-btn-selected'))
+          b.classList.add('game-suit-btn-selected')
+          document.getElementById('num-ok').disabled = false
+        }
+        numGrid.appendChild(b)
+      })
+
+      function closeNumDlg() {
+        chosenNum = null; pendingCard = null
+        document.getElementById('num-dlg').style.display = 'none'
+        document.getElementById('num-ok').disabled = true
+        numGrid.querySelectorAll('.game-number-btn').forEach(x => x.classList.remove('game-suit-btn-selected'))
+      }
+      document.getElementById('num-cancel').onclick = closeNumDlg
+      document.getElementById('num-ok').onclick = async () => {
+        if (chosenNum === null || !pendingCard) return
+        const { index, card } = pendingCard
+        closeNumDlg()
+        await playCard(index, card)
+        await api('number-request', { tableId: currentTableId, number: chosenNum })
+        await refresh()
+      }
+
+      // ── Leave ────────────────────────────────────────────────────────────────
+      document.getElementById('g-leave').onclick = async () => {
+        await api('leave-table', { tableId: currentTableId })
+        go('lobby')
+      }
+
+      // ── Core actions ─────────────────────────────────────────────────────────
+      function showErr(msg) {
+        const el = document.getElementById('g-err')
+        if (!el) return
+        if (msg) { el.textContent = msg; el.style.display = 'flex' }
+        else el.style.display = 'none'
+      }
+
+      async function playCard(index, card) {
+        showErr(null)
+        try { await api('play-card', { tableId: currentTableId, cardIndex: index, cardId: card }) }
+        catch (e) { showErr(e.message) }
+      }
+
+      // ── Paint current state ──────────────────────────────────────────────────
+      function paint() {
+        if (!gs) return
+        const { table, myPlayer, otherPlayers, messages } = gs
+        if (!table || !myPlayer) return
+
+        const opp       = otherPlayers?.[0]
+        const hand      = myPlayer.hand || []
+        const isMyTurn  = !myPlayer.turn_finished && table.status === 'playing'
+        const lastCard  = table.cards_on_table?.at(-1) || null
+        const pen       = table.penalising_action_card && table.action_card
+        const suitReq   = table.request_action_card && table.action_card && table.suite_request
+        const numReq    = table.request_action_card && table.action_card && table.number_request
+
+        // top bar
+        const tn = document.getElementById('g-tname')
+        if (tn) tn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/></svg> ${esc(table.name)}`
+
+        const badge = document.getElementById('g-badge')
+        if (badge) badge.className = `game-turn-badge ${isMyTurn ? 'game-turn-active' : 'game-turn-waiting'}`
+        const turnEl = document.getElementById('g-turn')
+        if (turnEl) turnEl.textContent = isMyTurn ? 'Your Turn' : "Opponent's Turn"
+        const packEl = document.getElementById('g-pack')
+        if (packEl) packEl.textContent = table.pack?.length ?? '—'
+
+        // opponent
+        const oav = document.getElementById('g-oav'); if (oav) oav.textContent = opp?.name?.[0]?.toUpperCase() || '?'
+        const on  = document.getElementById('g-oname'); if (on)  on.textContent  = opp?.name || 'Opponent'
+        const oc  = document.getElementById('g-ocards'); if (oc)  oc.textContent  = `${opp?.hand ?? 0} card${opp?.hand !== 1 ? 's' : ''}`
+        const oh  = document.getElementById('g-ohand')
+        if (oh) oh.innerHTML = Array.from({ length: opp?.hand ?? 0 }, (_, i) =>
+          `<div class="game-opponent-card" style="${i>0?'margin-left:-20px':''}">${cardBack('sm')}</div>`).join('')
+
+        // discard
+        const disc = document.getElementById('g-discard')
+        if (disc) disc.innerHTML = lastCard ? cardFace(lastCard, 'lg') : '<div class="game-discard-empty">No cards yet</div>'
+
+        // request label
+        const req = document.getElementById('g-req')
+        if (req) {
+          if (suitReq) {
+            req.style.display = ''
+            req.innerHTML = `<span style="color:${SUIT_COL[table.suite_request]}">${SUIT_SYM[table.suite_request]}</span> ${SUIT_NAME[table.suite_request]} requested`
+          } else if (numReq) {
+            req.style.display = ''
+            req.textContent = `${numLabel(parseInt(table.number_request))} requested`
+          } else {
+            req.style.display = 'none'
+          }
+        }
+
+        // draw button
+        const drawBtn = document.getElementById('g-draw')
+        if (drawBtn) {
+          const canDraw = isMyTurn && !pen
+          drawBtn.disabled = !canDraw
+          drawBtn.className = `game-draw-pile${canDraw ? ' game-draw-pile-active' : ''}`
+          drawBtn.onclick = canDraw ? async () => {
+            showErr(null)
+            try { await api('draw-card', { tableId: currentTableId }); await refresh() }
+            catch (e) { showErr(e.message) }
+          } : null
+        }
+
+        // action buttons
+        const acts = document.getElementById('g-actions')
+        if (acts) {
+          if (isMyTurn && pen) {
+            acts.innerHTML = `<button class="game-action-btn game-action-penalty" id="g-pen-btn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2v10M4.93 4.93l2.83 2.83M2 12h10M4.93 19.07l2.83-2.83M12 22v-10M19.07 19.07l-2.83-2.83M22 12H12M19.07 4.93l-2.83 2.83"/>
+              </svg>
+              Take ${table.forced_draw} Cards
+            </button>`
+            document.getElementById('g-pen-btn').onclick = async () => {
+              showErr(null)
+              try { await api('take-penalty', { tableId: currentTableId }); await refresh() }
+              catch (e) { showErr(e.message) }
+            }
+          } else {
+            acts.innerHTML = ''
+          }
+        }
+
+        // my info
+        const mav = document.getElementById('g-mav'); if (mav) mav.textContent = myPlayer.name?.[0]?.toUpperCase() || '?'
+        const mn  = document.getElementById('g-mname'); if (mn)  mn.textContent  = myPlayer.name || 'You'
+        const mc  = document.getElementById('g-mcards'); if (mc)  mc.textContent  = `${hand.length} card${hand.length !== 1 ? 's' : ''}`
+
+        // my hand
+        const handEl = document.getElementById('g-hand')
+        if (handEl) {
+          handEl.innerHTML = hand.map((card, i) => {
+            const playable = isMyTurn && canPlay(card, lastCard, table)
+            return `<div class="game-hand-card${playable ? ' game-hand-card-playable' : ''}" data-i="${i}" data-c="${card}" style="${i>0?'margin-left:-12px':''}">
+              ${cardFace(card, 'md', playable)}
+            </div>`
+          }).join('')
+
+          handEl.querySelectorAll('.game-hand-card-playable').forEach(el => {
+            el.onclick = () => {
+              const i = parseInt(el.dataset.i)
+              const c = el.dataset.c
+              const n = cardNum(c)
+              const p = gs.table.penalising_action_card && gs.table.action_card
+              if (n === 1 && !p) {
+                pendingCard = { index: i, card: c }
+                document.getElementById('suit-dlg').style.display = 'flex'
+                return
+              }
+              if (n === 13 && !p) {
+                pendingCard = { index: i, card: c }
+                document.getElementById('num-dlg').style.display = 'flex'
+                return
+              }
+              playCard(i, c).then(refresh)
+            }
+          })
+        }
+
+        // log
+        const logEl = document.getElementById('g-log')
+        if (logEl) {
+          logEl.innerHTML = !messages?.length
+            ? '<div class="game-log-empty">Game log will appear here</div>'
+            : messages.map(m => `<div class="game-log-entry game-log-${m.type}"><span class="game-log-dot"></span>${esc(m.message)}</div>`).join('')
+        }
+
+        // result
+        if (table.status === 'finished') {
+          const rdlg  = document.getElementById('result-dlg')
+          const rcard = document.getElementById('result-inner')
+          if (rdlg && rcard) {
+            const won = hand.length === 0
+            rcard.innerHTML = won ? `
+              <div class="game-result-icon game-result-win">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/></svg>
+              </div>
+              <h2 class="game-result-title game-result-win-text">Victory!</h2>
+              <p class="game-result-sub">You played all your cards</p>
+              <button class="game-result-btn" id="back-btn">Back to Lobby</button>
+            ` : `
+              <div class="game-result-icon game-result-lose">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+              </div>
+              <h2 class="game-result-title game-result-lose-text">Defeated</h2>
+              <p class="game-result-sub">Better luck next time</p>
+              <button class="game-result-btn" id="back-btn">Back to Lobby</button>
+            `
+            rdlg.style.display = 'flex'
+            document.getElementById('back-btn').onclick = async () => {
+              await api('leave-table', { tableId: currentTableId })
+              go('lobby')
+            }
+          }
+        }
+      }
+
+      async function refresh() {
+        try {
+          gs = await api('get-game-state', { tableId: currentTableId })
+          paint()
+        } catch (e) {
+          showErr(e.message)
+        }
+      }
+
+      refresh()
+
+      realtimeChannel = supabase.channel(`game-${currentTableId}`)
+        .on('postgres_changes', { event: '*',      schema: 'public', table: 'tables',        filter: `id=eq.${currentTableId}` },       refresh)
+        .on('postgres_changes', { event: '*',      schema: 'public', table: 'players',       filter: `table_id=eq.${currentTableId}` }, refresh)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_messages', filter: `table_id=eq.${currentTableId}` }, refresh)
+        .subscribe()
+    }
+
+    // =========================================================================
+    // Boot
+    // =========================================================================
+    supabase.auth.onAuthStateChange((event, session) => {
+      (() => {
+        if (session) {
+          currentUser = session.user
+          if (currentView === 'auth') go('lobby')
+        } else {
+          currentUser = null
+          go('auth')
+        }
+      })()
+    })
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) { currentUser = session.user; go('lobby') }
+      else go('auth')
+    })
+  </script>
+</body>
 </html>
