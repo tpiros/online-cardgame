@@ -183,14 +183,6 @@ Deno.serve(async (req: Request) => {
           .update({ table_id: tableId, status: "intable" })
           .eq("id", userId);
 
-        const newPlayerCount = (playerCount ?? 0) + 1;
-        if (newPlayerCount >= table.player_limit) {
-          await supabase
-            .from("tables")
-            .update({ status: "unavailable" })
-            .eq("id", tableId);
-        }
-
         await supabase.from("game_messages").insert({
           table_id: tableId,
           player_id: userId,
