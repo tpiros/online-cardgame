@@ -38,28 +38,46 @@ export function Lobby({ onJoinTable }: LobbyProps) {
       })
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   const fetchTables = async () => {
-    const { data: tableData } = await supabase.from('tables').select('*').order('created_at', { ascending: false })
-    const { data: playerData } = await supabase.from('players').select('table_id')
+    try {
+      const { data: tableData, error: tableError } = await supabase
+        .from('tables')
+        .select('*')
+        .order('created_at', { ascending: false })
 
-    // Count players per table
-    const countMap: Record<string, number> = {}
-    for (const p of playerData || []) {
-      if (p.table_id) {
-        countMap[p.table_id] = (countMap[p.table_id] || 0) + 1
+      if (tableError) throw tableError
+
+      const { data: playerData, error: playerError } = await supabase
+        .from('players')
+        .select('table_id')
+
+      if (playerError) throw playerError
+
+      // Count players per table
+      const countMap: Record<string, number> = {}
+      for (const p of playerData || []) {
+        if (p.table_id) {
+          countMap[p.table_id] = (countMap[p.table_id] || 0) + 1
+        }
       }
+
+      const enriched = (tableData || []).map((t: TableInfo) => ({
+        ...t,
+        player_count: countMap[t.id] || 0,
+      }))
+
+      setTables(enriched)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch tables')
+    } finally {
+      setLoading(false)
     }
-
-    const enriched = (tableData || []).map((t: TableInfo) => ({
-      ...t,
-      player_count: countMap[t.id] || 0,
-    }))
-
-    setTables(enriched)
-    setLoading(false)
   }
 
   const createTable = async () => {
@@ -67,6 +85,7 @@ export function Lobby({ onJoinTable }: LobbyProps) {
     setError(null)
     try {
       const result = await gameApi.createTable(tableName || 'Game Table')
+      await fetchTables()
       onJoinTable(result.table.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create table')
@@ -80,6 +99,7 @@ export function Lobby({ onJoinTable }: LobbyProps) {
     setError(null)
     try {
       await gameApi.joinTable(tableId)
+      await fetchTables()
       onJoinTable(tableId)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to join table')
