@@ -196,7 +196,7 @@ Deno.serve(async (req: Request) => {
           .eq("id", tableId)
           .single();
 
-        return new Response(JSON.stringify({ table: updatedTable, playerCount: newPlayerCount }), {
+        return new Response(JSON.stringify({ table: updatedTable, playerCount: (playerCount ?? 0) + 1 }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
