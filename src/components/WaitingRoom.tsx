@@ -15,27 +15,31 @@ export function WaitingRoom({ tableId, onGameStart, onLeave }: WaitingRoomProps)
   const [leaving, setLeaving] = useState(false)
 
   useEffect(() => {
-    const fetchPlayers = async () => {
-      const { data } = await supabase.from('players').select('name').eq('table_id', tableId)
-      if (data) {
-        setPlayerCount(data.length)
-        setPlayerNames(data.map((p) => p.name))
+    const fetchTableState = async () => {
+      const { data: players } = await supabase.from('players').select('name').eq('table_id', tableId)
+      if (players) {
+        setPlayerCount(players.length)
+        setPlayerNames(players.map((p) => p.name))
+      }
+      const { data: table } = await supabase.from('tables').select('status').eq('id', tableId).maybeSingle()
+      if (!table) {
+        onLeave()
+      } else if (table.status === 'playing') {
+        onGameStart()
       }
     }
-    fetchPlayers()
+    fetchTableState()
 
     const channel = supabase.channel(`waiting-${tableId}`)
     channel
       .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `table_id=eq.${tableId}` }, () => {
-        fetchPlayers()
+        fetchTableState()
       })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tables', filter: `id=eq.${tableId}` }, (payload) => {
-        if (payload.new.status === 'playing') {
-          onGameStart()
-        }
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tables', filter: `id=eq.${tableId}` }, () => {
+        fetchTableState()
       })
-      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'tables', filter: `id=eq.${tableId}` }, () => {
-        onLeave()
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_messages', filter: `table_id=eq.${tableId}` }, () => {
+        fetchTableState()
       })
       .subscribe()
 
