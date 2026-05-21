@@ -28,6 +28,7 @@
     let currentUser   = null
     let currentTableId = null
     let realtimeChannel = null
+    let pollInterval = null
 
     // ── Card helpers ──────────────────────────────────────────────────────────
     const SUIT_SYM  = { H: '♥', C: '♣', S: '♠', D: '♦' }
@@ -91,6 +92,7 @@
 
     // ── View switcher ─────────────────────────────────────────────────────────
     function go(view, tableId = null) {
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
       if (realtimeChannel) { supabase.removeChannel(realtimeChannel); realtimeChannel = null }
       currentView    = view
       currentTableId = tableId
@@ -427,6 +429,9 @@
         .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: `table_id=eq.${currentTableId}` }, poll)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'tables',  filter: `id=eq.${currentTableId}` },      poll)
         .subscribe()
+
+      // Fallback: poll every 2s so the non-starter always transitions
+      pollInterval = setInterval(poll, 2000)
     }
 
     // =========================================================================
@@ -781,7 +786,15 @@
 
       async function refresh() {
         try {
-          gs = await api('get-game-state', { tableId: currentTableId })
+          const data = await api('get-game-state', { tableId: currentTableId })
+          // If state looks incomplete (game started but no card on table yet), retry once
+          if (data.table?.status === 'playing' && !data.table?.cards_on_table?.length) {
+            await new Promise(r => setTimeout(r, 600))
+            const retry = await api('get-game-state', { tableId: currentTableId })
+            gs = retry
+          } else {
+            gs = data
+          }
           paint()
         } catch (e) {
           showErr(e.message)
@@ -795,6 +808,9 @@
         .on('postgres_changes', { event: '*',      schema: 'public', table: 'players',       filter: `table_id=eq.${currentTableId}` }, refresh)
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_messages', filter: `table_id=eq.${currentTableId}` }, refresh)
         .subscribe()
+
+      // Fallback poll: catches cases where realtime misses an event
+      pollInterval = setInterval(refresh, 3000)
     }
 
     // =========================================================================
